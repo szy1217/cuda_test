@@ -122,7 +122,14 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>%(AdditionalDependencies);cuda.lib;cudart.lib;cudadevrt.lib;nvrtc.lib;</AdditionalDependencies>
     </Link>
+    <CudaCompile>
+      <NvccCompilation>compile</NvccCompilation>
+    </CudaCompile>
+    <CudaCompile>
+      <CudaRuntime>Shared</CudaRuntime>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -138,7 +145,14 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <CudaLink>
+      <AdditionalLibraryDirectories>$(CudaToolkitBinDir)/lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </CudaLink>
+    <CudaCompile>
+      <CudaRuntime>Shared</CudaRuntime>
+    </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="cuda_test.cpp" />
