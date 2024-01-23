@@ -160,7 +160,14 @@ void VectorAdd::finalizeCalculation(std::vector<std::vector<int>>& out) {
 	cuModuleGetFunction(&cuFunction, cuModule, "operationKernel");
 
 	void* args[] = { &input, &arrayTypes, &n_ };
-	cuLaunchKernel(cuFunction, NUM_THREADS, 1, 1, NUM_BLOCKS, 1, 1, 0, 0, args, nullptr);
+	CUresult result = cuLaunchKernel(cuFunction, NUM_THREADS, 1, 1, NUM_BLOCKS, 1, 1, 0, 0, args, nullptr);
+	if (result == CUDA_SUCCESS)
+		std::cout << "Kernel launched successfully." << std::endl;
+	else {
+		const char* errorStr;
+		cuGetErrorString(result, &errorStr);
+		std::cerr << "CUDA error: " << errorStr<< std::endl;
+	}
 
 	// Allocate memory for output
 	size_t i = 0;
