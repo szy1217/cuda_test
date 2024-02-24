@@ -10,6 +10,8 @@
 #include <vector>
 #include <string>
 
+#include <math_functions.h>
+
 #define MAX_N_NAME 64U
 
 // CUDA kernel for vector addition
@@ -22,15 +24,15 @@ public:
 	VectorAdd(size_t n);
 	size_t createInputVariable(int* vec);
 	size_t applyOperation(Operation op, size_t id_a, size_t id_b);
-	void declareOutputVariable(int* o);
 	void declareOutputVariable(size_t id);
-	void finalizeCalculation(std::vector<std::vector<int>>& out);
+	void finalizeCalculation(std::vector<int*>& out);
 	void freeVariable(size_t id);
+	void releaseProgram(nvrtcProgram& p);
 private:
 	int NUM_THREADS;
 	int NUM_BLOCKS;
 	std::vector<int*> hostVarList_, deviceVarList_;
-	std::vector<int*> outputPtr_;
+	std::vector<size_t> outputId_;
 	std::vector<int> arrayTypes_;
 	size_t n_;
 	std::string source_;
@@ -41,60 +43,38 @@ VectorAdd::VectorAdd(size_t n): n_(n) {
 	hostVarList_.clear();
 	deviceVarList_.clear();
 	arrayTypes_.clear();
-	source_ = "extern \"C\" __global__ void operationKernel(int** input, int* arrayTypes, int n) {"
-		      "    int tid = blockIdx.x * blockDim.x + threadIdx.x;";
+	source_ = "extern \"C\" __global__ void operationKernel(int** input, int* arrayTypes, int n) {\n"
+		      "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n";
 }
 
 size_t VectorAdd::createInputVariable(int* vec) {
-	// Check if the vector is in device memory
-	auto it = std::find(deviceVarList_.begin(), deviceVarList_.end(), vec);
-	if (it == deviceVarList_.end()) {
-		int* dMem;
-		deviceVarList_.push_back(dMem);
-		arrayTypes_.push_back(Vector);
-		// Allocate memory in device
-		cudaMalloc(&deviceVarList_.back(), sizeof(int) * n_);
-		// Copy the vector from host to device
-		cudaMemcpy(deviceVarList_.back(), vec, sizeof(int) * n_, cudaMemcpyHostToDevice);
-		std::cout << " not found" << std::endl;
-		return deviceVarList_.size() - 1;
-	}
-	else {
-		std::cout << " found" << std::endl;
-		return std::distance(deviceVarList_.begin(), it);
-	}
+	int* dMem;
+	deviceVarList_.push_back(dMem);
+	arrayTypes_.push_back(Vector);
+	hostVarList_.push_back(vec);
+	//cudaMalloc(&deviceVarList_.back(), sizeof(int) * n_);
+	//cudaMemcpy(deviceVarList_.back(), vec, sizeof(int) * n_, cudaMemcpyHostToDevice);
+	return deviceVarList_.size() - 1;
 }
 
 size_t VectorAdd::applyOperation(Operation op, size_t id_a, size_t id_b) {
-	int* d_a = deviceVarList_[id_a];
-	int* d_b = deviceVarList_[id_b];
 	int* d_res;
-	// Allocate memory for result array
-	cudaMalloc(&d_res, sizeof(int) * n_);
+	hostVarList_.push_back(nullptr);
+	//cudaMalloc(&d_res, sizeof(int) * n_);
 	size_t id_res = deviceVarList_.size();
 	NUM_BLOCKS = (n_ + NUM_THREADS - 1) / NUM_THREADS;
 	// Compute vector addition in the device, do not consider scalar here
 	if (op == Add)
 		source_ += "if (tid < n) input[" + std::to_string(id_res) + "][tid] = input["
-		+ std::to_string(id_a) + "][tid] + input[" + std::to_string(id_b) + "][tid];";
+		+ std::to_string(id_a) + "][tid] + input[" + std::to_string(id_b) + "][tid];\n";
 	deviceVarList_.push_back(d_res);
 	arrayTypes_.push_back(Vector);
 	return id_res;
 }
 
-void VectorAdd::declareOutputVariable(int* o) {
-	auto it = std::find(deviceVarList_.begin(), deviceVarList_.end(), o);
-	if (it != deviceVarList_.end()) {
-		outputPtr_.push_back(o);
-	}
-	else {
-		std::cerr << "Output variable not found on device" << std::endl;
-	}
-}
-
 void VectorAdd::declareOutputVariable(size_t id) {
 	if (id < deviceVarList_.size()) {
-		outputPtr_.push_back(deviceVarList_[id]);
+		outputId_.push_back(id);
 	}
 	else {
 		std::cerr << "Output variable not found on device" << std::endl;
@@ -105,7 +85,12 @@ void VectorAdd::freeVariable(size_t id) {
 	cudaFree(deviceVarList_[id]);
 }
 
-void VectorAdd::finalizeCalculation(std::vector<std::vector<int>>& out) {
+void VectorAdd::releaseProgram(nvrtcProgram& p) {
+	nvrtcResult err = nvrtcDestroyProgram(&p);
+	std::cout << "NVRTC Error: " << nvrtcGetErrorString(err) << std::endl;
+}
+
+void VectorAdd::finalizeCalculation(std::vector<int*>& out) {
 	NUM_BLOCKS = (n_ + NUM_THREADS - 1) / NUM_THREADS;
 
 	// generate int* arrayType
@@ -113,14 +98,20 @@ void VectorAdd::finalizeCalculation(std::vector<std::vector<int>>& out) {
 	for (size_t i = 0; i < arrayTypes_.size(); i++) {
 		h_arrayTypes[i] = arrayTypes_[i];
 	}
-
+	
 	// Allocate memory and copy to device
 	int** input;
 	int* arrayTypes;
 	cudaMalloc(&input, deviceVarList_.size() * sizeof(int*));
 	cudaMalloc(&arrayTypes, arrayTypes_.size() * sizeof(int));
 	for (size_t i = 0; i < deviceVarList_.size(); i++) {
-		cudaMemcpy(&input[i], &deviceVarList_[i], sizeof(int*), cudaMemcpyHostToDevice);
+		// Allocate memory in device
+		cudaMalloc(&deviceVarList_[i], sizeof(int) * n_);
+		// Copy the vector from host to device
+		if (hostVarList_[i] != nullptr) {
+			auto err = cudaMemcpy(deviceVarList_[i], hostVarList_[i], sizeof(int) * n_, cudaMemcpyHostToDevice);
+		}
+		auto err = cudaMemcpy(&input[i], &deviceVarList_[i], sizeof(int*), cudaMemcpyHostToDevice);
 	}
 	cudaMemcpy(arrayTypes, h_arrayTypes, arrayTypes_.size() * sizeof(int), cudaMemcpyHostToDevice);
 
@@ -145,12 +136,18 @@ void VectorAdd::finalizeCalculation(std::vector<std::vector<int>>& out) {
 	nvrtcGetPTXSize(program, &ptxSize);
 	char* ptx = new char[ptxSize];
 	nvrtcGetPTX(program, ptx);
-	nvrtcDestroyProgram(&program);
+	nvrtcResult nvrtc_err = nvrtcDestroyProgram(&program);
+	std::cout << "NVRTC Error: " << nvrtcGetErrorString(nvrtc_err) << std::endl;
 
 	// Initialize CUDA context and module
 	CUcontext cuContext;
 	cuInit(0);
-	cuCtxCreate(&cuContext, 0, 0);
+	CUresult cu_err = cuCtxCreate(&cuContext, 0, 0);
+	if (cu_err != CUDA_SUCCESS) {
+		const char* errStr;
+		cuGetErrorString(cu_err, &errStr);
+		std::cout << "CUDA Error: " << errStr << std::endl;
+	}
 
 	CUmodule cuModule;
 	cuModuleLoadData(&cuModule, ptx);
@@ -171,15 +168,14 @@ void VectorAdd::finalizeCalculation(std::vector<std::vector<int>>& out) {
 
 	// Allocate memory for output
 	size_t i = 0;
-	for (auto const& oPtr : outputPtr_) {
-		int* h_res;
-		h_res = (int*)malloc(sizeof(int) * n_);
-
+	for (auto const& oId : outputId_) {
+		out[i] = (int*)malloc(sizeof(int) * n_);
 		// copy the output from device to host
-		cudaMemcpy(h_res, oPtr, sizeof(int) * n_, cudaMemcpyDeviceToHost);
-		std::copy(h_res, h_res + n_, out[i].begin());
+		cudaMemcpy(out[i], deviceVarList_[oId], sizeof(int) * n_, cudaMemcpyDeviceToHost);
+		//std::copy(h_res, h_res + n_, out[i].begin());
 		++i;
 	}
+	std::cout << "cuCtxDestroy" << cuCtxDestroy(cuContext) << std::endl;
 }
 
 // Initialize vector of size n
@@ -190,7 +186,7 @@ void vector_init(int* a, int n) {
 }
 
 // Check vector add result
-void check_answer(int* a, int* b, std::vector<int> c, int n) {
+void check_answer(int* a, int* b, int* c, int n) {
 	for (int i = 0; i < n; i++) {
 		if (i == 0) {
 			std::cout << a[0] << " " << b[0] << " " << c[0] << std::endl;
@@ -229,11 +225,11 @@ int main() {
 	size_t id_b = c.createInputVariable(h_b);
 	size_t id_c = c.applyOperation(Operation::Add, id_a, id_b);
 	id_c = c.applyOperation(Operation::Add, id_c, id_c);
-	//c.freeVariable(id_a);
-	//c.freeVariable(id_b);
 	c.declareOutputVariable(id_c);
-	std::vector<std::vector<int>> output(1, std::vector<int>(n));
+	std::vector<int*> output(1);
 	c.finalizeCalculation(output);
+	c.freeVariable(id_a);
+	c.freeVariable(id_b);
 
 	// Check result for errors
 	check_answer(h_a, h_b, output[0], n);
