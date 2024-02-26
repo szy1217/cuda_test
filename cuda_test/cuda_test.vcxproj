@@ -122,7 +122,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>%(AdditionalDependencies);cuda.lib;cudart.lib;cudadevrt.lib;nvrtc.lib;</AdditionalDependencies>
+      <AdditionalDependencies>%(AdditionalDependencies);cuda.lib;cudart.lib;cudadevrt.lib;nvrtc.lib</AdditionalDependencies>
     </Link>
     <CudaCompile>
       <NvccCompilation>compile</NvccCompilation>

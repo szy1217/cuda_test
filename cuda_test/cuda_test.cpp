@@ -1,7 +1,9 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
-#include <device_launch_parameters.h>
+#include <curand.h>
+#include <curand_mtgp32_host.h>
+//#include <device_launch_parameters.h>
 #include <nvrtc.h>
 #include <cstdlib>
 #include <stdio.h>
@@ -28,6 +30,7 @@ public:
 	void finalizeCalculation(std::vector<int*>& out);
 	void freeVariable(size_t id);
 	void releaseProgram(nvrtcProgram& p);
+	void releaseMem(double*& m);
 private:
 	int NUM_THREADS;
 	int NUM_BLOCKS;
@@ -43,7 +46,8 @@ VectorAdd::VectorAdd(size_t n): n_(n) {
 	hostVarList_.clear();
 	deviceVarList_.clear();
 	arrayTypes_.clear();
-	source_ = "extern \"C\" __global__ void operationKernel(int** input, int* arrayTypes, int n) {\n"
+	source_ = "#include <curand_kernel.h>\n\n"
+			  "extern \"C\" __global__ void operationKernel(int** input, int* arrayTypes, int n) {\n"
 		      "    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n";
 }
 
@@ -85,6 +89,13 @@ void VectorAdd::freeVariable(size_t id) {
 	cudaFree(deviceVarList_[id]);
 }
 
+void VectorAdd::releaseMem(double*& m) {
+	cudaError_t err = cudaFree(m);
+	if (err != cudaSuccess) {
+		std::cerr << "CudaContext: error during cudaFree: " << cudaGetErrorString(err) << std::endl;
+	}
+}
+
 void VectorAdd::releaseProgram(nvrtcProgram& p) {
 	nvrtcResult err = nvrtcDestroyProgram(&p);
 	std::cout << "NVRTC Error: " << nvrtcGetErrorString(err) << std::endl;
@@ -116,19 +127,57 @@ void VectorAdd::finalizeCalculation(std::vector<int*>& out) {
 	cudaMemcpy(arrayTypes, h_arrayTypes, arrayTypes_.size() * sizeof(int), cudaMemcpyHostToDevice);
 
 	// finish source code
-	source_ += "}";
+	source_ += "}\n";
+
+	// Random generator state
+	curandStateMtgp32* mtStates;
+	cudaMalloc(&mtStates, NUM_BLOCKS * sizeof(curandStateMtgp32));
+
+	// Define MTGP32 parameters
+	mtgp32_kernel_params* kernelParams;
+	cudaMalloc((void**)&kernelParams, sizeof(mtgp32_kernel_params));
+	curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, kernelParams);
+
+	// Initialize MTGP32 states
+	curandMakeMTGP32KernelState(mtStates, mtgp32dc_params_fast_11213, kernelParams, NUM_BLOCKS, 1234);
+
+	unsigned int* rgOut;
+	cudaMalloc(&rgOut, n_ * sizeof(unsigned int));
+	unsigned int* rgOut2;
+	cudaMalloc(&rgOut2, n_ * sizeof(unsigned int));
+
+	source_ += "\n"
+			"extern \"C\" __global__ void randomGenerator(curandStateMtgp32 *mtStates, unsigned int* rgOut, unsigned int* rgOut2, int n) {\n"
+		    "	int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+			"	if (tid == 0) printf(\"randomGenerator called\");\n"
+		    "	if (tid < n) {\n"
+			"		rgOut[tid] = curand(&mtStates[blockIdx.x]);\n"
+			"		rgOut2[tid] = curand(&mtStates[blockIdx.x]);\n"
+			"	}\n"
+			"}\n";
+
 	std::cout << source_ << std::endl;
 
 	// compile source code
 	nvrtcProgram program;
 	nvrtcCreateProgram(&program, source_.c_str(), "kernel.cu", 0, nullptr, nullptr);
 
-	const char* compileOptions[] = { "--gpu-architecture=compute_52", "-std=c++17", nullptr };
-	nvrtcResult compileResult = nvrtcCompileProgram(program, 2, compileOptions);
+	const char* compileOptions[] = { "--include-path=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.3/include", "--gpu-architecture=compute_75", "-std=c++17", nullptr };
+	nvrtcResult compileResult = nvrtcCompileProgram(program, 3, compileOptions);
 
 	// Check compilation result
 	if (compileResult != NVRTC_SUCCESS) {
 		std::cerr << nvrtcGetErrorString(compileResult) << std::endl;
+		
+		// Output compilation log
+		size_t logSize;
+		nvrtcGetProgramLogSize(program, &logSize);
+
+		char* log = new char[logSize];
+		nvrtcGetProgramLog(program, log);
+
+		std::cout << "Compilation log:" << std::endl;
+		std::cout << log << std::endl;
 	}
 
 	// Retrieve the compiled PTX code
@@ -157,7 +206,7 @@ void VectorAdd::finalizeCalculation(std::vector<int*>& out) {
 	cuModuleGetFunction(&cuFunction, cuModule, "operationKernel");
 
 	void* args[] = { &input, &arrayTypes, &n_ };
-	CUresult result = cuLaunchKernel(cuFunction, NUM_THREADS, 1, 1, NUM_BLOCKS, 1, 1, 0, 0, args, nullptr);
+	CUresult result = cuLaunchKernel(cuFunction, NUM_BLOCKS, 1, 1, NUM_THREADS, 1, 1, 0, 0, args, nullptr);
 	if (result == CUDA_SUCCESS)
 		std::cout << "Kernel launched successfully." << std::endl;
 	else {
@@ -175,7 +224,35 @@ void VectorAdd::finalizeCalculation(std::vector<int*>& out) {
 		//std::copy(h_res, h_res + n_, out[i].begin());
 		++i;
 	}
-	std::cout << "cuCtxDestroy" << cuCtxDestroy(cuContext) << std::endl;
+
+	// Random generator
+	CUfunction cuFunction2;
+	auto err = cuModuleGetFunction(&cuFunction2, cuModule, "randomGenerator");
+	std::cout << "cuModuleGetFunction: " << err << std::endl;
+
+	void* args2[] = { &mtStates, &rgOut, &rgOut2, &n_ };
+	CUresult result2 = cuLaunchKernel(cuFunction2, NUM_BLOCKS, 1, 1, NUM_THREADS, 1, 1, 0, 0, args2, nullptr);
+	if (result2 == CUDA_SUCCESS)
+		std::cout << "Kernel launched successfully." << std::endl;
+	else {
+		const char* errorStr;
+		cuGetErrorString(result, &errorStr);
+		std::cerr << "CUDA error: " << errorStr << std::endl;
+	}
+
+	// Allocate memory for output
+	std::vector<unsigned int> h_rgOut(n_);
+	cudaMemcpy(h_rgOut.data(), rgOut, sizeof(unsigned int) * n_, cudaMemcpyDeviceToHost);
+	std::vector<unsigned int> h_rgOut2(n_);
+	cudaMemcpy(h_rgOut2.data(), rgOut2, sizeof(unsigned int) * n_, cudaMemcpyDeviceToHost);
+	for (size_t i = 0; i < 25; i++) {
+		std::cout << h_rgOut[i] << " ";
+	}
+	std::cout << std::endl;
+	for (size_t i = 0; i < 25; i++) {
+		std::cout << h_rgOut2[i] << " ";
+	}
+	std::cout << std::endl;
 }
 
 // Initialize vector of size n
@@ -209,7 +286,7 @@ int main() {
 	std::cout << "cudaRes = " << (cudaRes == cudaSuccess) << std::endl;
 
 	// Vector size
-	int n = 1 << 16;
+	int n = 1 << 15;
 
 	// Host vector pointers
 	int* h_a;
